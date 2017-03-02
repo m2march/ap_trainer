@@ -1,6 +1,7 @@
 # coding: utf-8
 import music21 as m21
 import sys
+import time
 import os
 import glob
 import random
@@ -18,6 +19,7 @@ gflags.DEFINE_integer('segment_count', 1, 'Number of segments to test',
                       lower_bound=1, short_name='s')
 gflags.DEFINE_integer('bpm', 80, 'Speed of segments. If None, use original',
                       lower_bound=60, upper_bound=200, short_name='m')
+gflags.DEFINE_multistring('collections', None, 'Collections to use')
 
 
 FLAGS = gflags.FLAGS
@@ -43,7 +45,7 @@ def tiny_collection_parser(tiny_line):
     else:
         key_text = 'C'
 
-    ts_match = re.search('TS:([0-9]/[0-9])', preamble)
+    ts_match = re.search('TS:([0-9]*/[0-9])', preamble)
     if ts_match is not None:
         ts_text = ts_match.groups()[0]
     else:
@@ -105,16 +107,6 @@ def streams_from_tnc(tnc_filename):
     return streams
 
 
-def test_tiny(file_name, idx):
-    with open(file_name, 'r') as f:
-        lines = f.readlines()
-
-    s = tiny_collection_parser(lines[idx])
-    s.show('midi')
-    s.show('lily')
-    return (s, lines[idx])
-
-
 def extract_segments(stream_info, min_notes_count, min_beat_duration):
     '''
     Args:
@@ -150,9 +142,22 @@ def extract_segments(stream_info, min_notes_count, min_beat_duration):
         except StopIteration:
             keep_extract = False
 
+def notes_from_ans(ans):
+    notes = []
+    note = None
+    for x in ans:
+        if x in list('abcdefg'):
+            if note is not None:
+                notes.append(note)
+            note = x
+        elif x == '-':
+            note = note + x
+    notes.append(note)
+    return notes
+
 
 def are_correct_notes(notes_string, segment):
-    notes = list(notes_string)
+    notes = notes_from_ans(notes_string)
     expected_notes = segment_notes(segment)
     correct_notes = [n.lower() == ex.lower()
                      for n, ex in zip(notes, expected_notes)].count(False)
@@ -184,9 +189,30 @@ def scale_from_pitch(pitch):
     return stream
 
 
-def record_score(note_accuracy, segment_accuracy):
+def comparison_segment(ans_text, expected_stream):
+    ret_stream = m21.stream.Stream()
+    ret_stream.append(expected_stream.getElementsByClass('MetronomeMark')[0])
+    ret_stream.append(expected_stream.getElementsByClass('TimeSignature')[0])
+    ret_stream.append(expected_stream.getElementsByClass('Key')[0])
+
+    ans_notes_names = list(ans_text)
+    ans_notes = []
+    note_counter = 0
+    for nr in expected_stream.notesAndRests:
+        if isinstance(nr, m21.note.Rest):
+            continue
+        n = m21.note.Note(ans_notes_names[note_counter])
+        n.octave = nr.octave
+        n.duration = nr.duration
+        ans_notes.append(n)
+        note_counter += 1
+
+    # TODO(march): finish
+
+
+def record_score(note_accuracy, segment_accuracy, total_time):
     columns = ['min_note_count', 'min_beat_count', 'segment_count', 'bpm',
-               'key', 'note_accuracy', 'segment_accuracy']
+               'key', 'note_accuracy', 'segment_accuracy', 'total_time']
     f = None
     if not os.path.isfile(SCORE_FILE):
         f = open(SCORE_FILE, 'w')
@@ -198,14 +224,17 @@ def record_score(note_accuracy, segment_accuracy):
     elems = [FLAGS.min_note_count, FLAGS.min_beat_count,
              FLAGS.segment_count, FLAGS.bpm, KEY.name,
              '{:.2f}'.format(note_accuracy),
-             '{:.2f}'.format(segment_accuracy)]
+             '{:.2f}'.format(segment_accuracy),
+             '{:.2f}'.format(total_time)]
     f.write(', '.join([str(x) for x in elems]) + '\n')
     f.close()
 
 
 def main(argv):
+    collections_files = (glob.glob(TNC_GLOB) if FLAGS.collections is None else
+                         FLAGS.collections)
     all_segments = [segment
-                    for collections in glob.glob(TNC_GLOB)
+                    for collections in collections_files
                     for stream in streams_from_tnc(collections)
                     for segment in extract_segments(
                         flat_and_transposed(stream),
@@ -220,6 +249,7 @@ def main(argv):
     note_error_count = 0.
     segment_error_count = 0.
     try:
+        start_time = time.time()
         for idx, segment in enumerate(segments):
             play_segment(segment)
             sys.stdout.write('> ')
@@ -228,19 +258,27 @@ def main(argv):
             total_note_count += len(segment.notes)
             if errors == 0:
                 sys.stdout.write(u' ✓\n')
+                repeat_segment = segment
             else:
                 note_error_count += errors
                 segment_error_count += 1
-                sys.stdout.write(u' ✗ {}\n'.format(
+                sys.stdout.write(u'✗ {}\n'.format(
                     ''.join(segment_notes(segment))))
+                repeat_segment = segment
 
-            if idx < len(segments) - 1:
-                sys.stdout.write('Next?')
-                raw_input()
+            ask = True
+            while ask:
+                sys.stdout.write('Next / repeat (n/r)? ')
+                ans = raw_input()
+                if ans.lower() == 'r':
+                    play_segment(repeat_segment)
+                elif ans.lower() == 'n':
+                    ask = False
 
+        end_time = time.time()
         note_accuracy = (1 - (note_error_count / total_note_count))
         segment_accuracy = (1 - (segment_error_count / len(segments)))
-        record_score(note_accuracy, segment_accuracy)
+        record_score(note_accuracy, segment_accuracy, end_time - start_time)
         print 'Note accuracy: {:.0f}%'.format(100 * note_accuracy)
         print 'Segment accuracy: {:.0f}%'.format(100 * segment_accuracy)
     except KeyboardInterrupt:
