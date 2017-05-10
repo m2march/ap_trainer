@@ -11,6 +11,8 @@ from google.apputils import app
 from subprocess import Popen, PIPE
 
 
+DEFAULT_COLLECTIONS = ['ejemplos/ina2/*.tnc', 'ejemplos/a1/*.tnc']
+
 gflags.DEFINE_integer('min_note_count', 2, 'Minimun note count per segment',
                       lower_bound=1, short_name='n')
 gflags.DEFINE_integer('min_beat_count', 1, 'Minimun note count per segment',
@@ -19,14 +21,13 @@ gflags.DEFINE_integer('segment_count', 1, 'Number of segments to test',
                       lower_bound=1, short_name='s')
 gflags.DEFINE_integer('bpm', 80, 'Speed of segments. If None, use original',
                       lower_bound=60, upper_bound=200, short_name='m')
-gflags.DEFINE_multistring('collections', None, 'Collections to use')
+gflags.DEFINE_multistring('collections', DEFAULT_COLLECTIONS, 
+                          'Collections to use')
+gflags.DEFINE_bool('random_key', False, 'Whether to use a random key',
+                   short_name='r')
 
 
 FLAGS = gflags.FLAGS
-
-TNC_GLOB = 'ejemplos/*.tnc'
-
-collections = glob.glob(TNC_GLOB)
 
 KEY = m21.pitch.Pitch('C')
 
@@ -78,27 +79,33 @@ def parse_abc(abc_file):
     return s
 
 
-def flat_and_transposed(s):
-    def transpose_note_or_rest(nr, interval):
-        if isinstance(nr, m21.note.Note):
-            return nr.transpose(interval)
-        else:
-            return nr
-
+def flat_and_in_c(s):
     tss = s.recurse().getElementsByClass('TimeSignature')
     ts = tss[0]
 
     keys = s.recurse().getElementsByClass('KeySignature')
     key = keys[0]
 
-    interval = m21.interval.Interval(key.asKey().tonic, KEY)
+    new_notes = transpose_segment(s, key.asKey().tonic, KEY)
+
+    return (ts, new_notes)
+
+
+def transpose_segment(s, original_key, final_key):
+    def transpose_note_or_rest(nr, interval):
+        if isinstance(nr, m21.note.Note):
+            return nr.transpose(interval)
+        else:
+            return nr
+
+    interval = m21.interval.Interval(original_key, final_key)
 
     old_notes = s.flat.notesAndRests
     new_notes = [transpose_note_or_rest(n, interval) for n in old_notes]
     for on, nn in zip(old_notes, new_notes):
         nn.offset = on.offset
 
-    return (ts, new_notes)
+    return new_notes
 
 
 def streams_from_tnc(tnc_filename):
@@ -168,8 +175,25 @@ def segment_notes(segment):
     return [n.pitch.name for n in segment if isinstance(n, m21.note.Note)]
 
 
-def play_segment(segment):
-    midifile = m21.midi.translate.streamToMidiFile(segment)
+def segment_from_segment_and_notes(original_segment, new_notes):
+        tss = original_segment.recurse().getElementsByClass('TimeSignature')
+        ts = tss[0]
+        mms = original_segment.recurse().getElementsByClass('MetronomeMark')
+        mm = mms[0]
+        new_segment = m21.stream.Stream()
+        new_segment.append([mm, ts])
+        new_segment.append(new_notes)
+        return new_segment
+
+
+def play_segment(segment, key):
+    if key.name != KEY.name:
+        new_notes = transpose_segment(segment, KEY, key)
+        transposed_segment = segment_from_segment_and_notes(segment, new_notes)
+    else:
+        transposed_segment = segment
+
+    midifile = m21.midi.translate.streamToMidiFile(transposed_segment)
     midifile.open('temp.mid', 'wb')
     midifile.write()
     midifile.close()
@@ -182,6 +206,8 @@ def scale_from_pitch(pitch):
     scale = m21.scale.DiatonicScale(pitch)
     stream = m21.stream.Stream()
     stream.append(m21.tempo.MetronomeMark(number=80))
+    stream.append(m21.meter.TimeSignature('4/4'))
+    stream.append(m21.key.Key(pitch))
     for p in scale.pitches:
         stream.append(m21.note.Note(p, quarterLength=1.0))
     stream.append(m21.note.Rest(quarterLength=1.0))
@@ -210,7 +236,7 @@ def comparison_segment(ans_text, expected_stream):
     # TODO(march): finish
 
 
-def record_score(note_accuracy, segment_accuracy, total_time):
+def record_score(note_accuracy, segment_accuracy, total_time, key):
     columns = ['min_note_count', 'min_beat_count', 'segment_count', 'bpm',
                'key', 'note_accuracy', 'segment_accuracy', 'total_time']
     f = None
@@ -222,7 +248,8 @@ def record_score(note_accuracy, segment_accuracy, total_time):
         f = open(SCORE_FILE, 'a')
 
     elems = [FLAGS.min_note_count, FLAGS.min_beat_count,
-             FLAGS.segment_count, FLAGS.bpm, KEY.name,
+             FLAGS.segment_count, FLAGS.bpm,
+             key.name if FLAGS.random_key else 'random',
              '{:.2f}'.format(note_accuracy),
              '{:.2f}'.format(segment_accuracy),
              '{:.2f}'.format(total_time)]
@@ -230,55 +257,72 @@ def record_score(note_accuracy, segment_accuracy, total_time):
     f.close()
 
 
+def random_key():
+    k = random.choice(['Ab3', 'A3', 'Bb3', 'B3', 'C4',
+                       'C#4', 'D#4', 'E4', 'F4', 'F#4', 'G4'])
+    return m21.pitch.Pitch(k)
+
+
 def main(argv):
-    collections_files = (glob.glob(TNC_GLOB) if FLAGS.collections is None else
-                         FLAGS.collections)
+    key = KEY if not FLAGS.random_key else random_key()
+    collections_files = [f
+                         for tnc_glob in FLAGS.collections
+                         for f in glob.glob(tnc_glob)]
+
     all_segments = [segment
                     for collections in collections_files
                     for stream in streams_from_tnc(collections)
                     for segment in extract_segments(
-                        flat_and_transposed(stream),
+                        flat_and_in_c(stream),
                         FLAGS.min_note_count, FLAGS.min_beat_count)]
 
     segments = random.sample(all_segments, FLAGS.segment_count)
 
-    scale = scale_from_pitch(KEY)
-    play_segment(scale)
+    scale = scale_from_pitch(key)
+    print key
+    play_segment(scale, key)
 
     total_note_count = 0.
     note_error_count = 0.
     segment_error_count = 0.
+    repeat_counts = []
     try:
         start_time = time.time()
         for idx, segment in enumerate(segments):
-            play_segment(segment)
-            sys.stdout.write('> ')
-            ans = raw_input()
-            errors = are_correct_notes(ans, segment)
-            total_note_count += len(segment.notes)
-            if errors == 0:
-                sys.stdout.write(u' ✓\n')
+            ans = None
+            repeat_count = 0
+            while not ans:
+                repeat_count += 1
+                play_segment(segment, key)
+                ans = raw_input('> ')
+                if not ans:
+                    continue
+                errors = are_correct_notes(ans, segment)
+                total_note_count += len(segment.notes)
+                if errors == 0:
+                    sys.stdout.write(u' ✓\n')
+                else:
+                    note_error_count += errors
+                    segment_error_count += 1
+                    sys.stdout.write(u'✗ {}\n'.format(
+                        ''.join(segment_notes(segment))))
                 repeat_segment = segment
-            else:
-                note_error_count += errors
-                segment_error_count += 1
-                sys.stdout.write(u'✗ {}\n'.format(
-                    ''.join(segment_notes(segment))))
-                repeat_segment = segment
+                repeat_counts.append(repeat_count)
 
-            ask = True
-            while ask:
-                sys.stdout.write('Next / repeat (n/r)? ')
-                ans = raw_input()
-                if ans.lower() == 'r':
-                    play_segment(repeat_segment)
-                elif ans.lower() == 'n':
-                    ask = False
+                ask = True
+                while ask:
+                    sys.stdout.write('Next / repeat (n/r)? ')
+                    ans = raw_input()
+                    if ans.lower() == 'r':
+                        play_segment(repeat_segment, key)
+                    elif ans.lower() == 'n':
+                        ask = False
 
         end_time = time.time()
         note_accuracy = (1 - (note_error_count / total_note_count))
         segment_accuracy = (1 - (segment_error_count / len(segments)))
-        record_score(note_accuracy, segment_accuracy, end_time - start_time)
+        record_score(note_accuracy, segment_accuracy, end_time - start_time,
+                     key)
         print 'Note accuracy: {:.0f}%'.format(100 * note_accuracy)
         print 'Segment accuracy: {:.0f}%'.format(100 * segment_accuracy)
     except KeyboardInterrupt:

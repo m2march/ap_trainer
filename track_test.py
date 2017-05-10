@@ -1,3 +1,7 @@
+'''
+Usage: track_test.py FLAGS file_name idx
+'''
+
 import re
 from trainer import tiny_collection_parser
 from google.apputils import app
