@@ -149,6 +149,11 @@ def extract_segments(stream_info, min_notes_count, min_beat_duration):
         except StopIteration:
             keep_extract = False
 
+
+def is_valid_ans(ans):
+    pattern = '[a-gA-G\-][a-gA-G\-]*'
+    return ans is not None and re.match(pattern, ans) is not None
+
 def notes_from_ans(ans):
     notes = []
     note = None
@@ -290,12 +295,13 @@ def main(argv):
         start_time = time.time()
         for idx, segment in enumerate(segments):
             ans = None
+            end_song = False
             repeat_count = 0
-            while not ans:
+            while not end_song:
                 repeat_count += 1
                 play_segment(segment, key)
                 ans = raw_input('> ')
-                if not ans:
+                if not is_valid_ans(ans):
                     continue
                 errors = are_correct_notes(ans, segment)
                 total_note_count += len(segment.notes)
@@ -317,6 +323,7 @@ def main(argv):
                         play_segment(repeat_segment, key)
                     elif ans.lower() == 'n':
                         ask = False
+                        end_song = True
 
         end_time = time.time()
         note_accuracy = (1 - (note_error_count / total_note_count))
